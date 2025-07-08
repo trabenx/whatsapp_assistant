@@ -1,0 +1,8 @@
+python-dotenv
+flask
+requests
+ngrok
+wasenderapi
+apscheduler
+pytz
+cryptography
