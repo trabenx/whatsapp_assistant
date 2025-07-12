@@ -6,6 +6,8 @@ import pytz
 from whatsapp_client import client as whatsapp_client
 import config
 
+import time
+import random
 # Use a timezone-aware scheduler
 israel_tz = pytz.timezone('Asia/Jerusalem')
 scheduler = BackgroundScheduler(timezone=israel_tz)
@@ -19,6 +21,10 @@ def sync_message_to_all_groups(original_message):
 
     for group_id in config.TARGET_GROUP_IDS:
         whatsapp_client.resend_message(group_id, original_message)
+        delay = random.randint(10, 30)
+        print(f"Sleeping for {delay} seconds...")
+        time.sleep(delay)
+
 
     whatsapp_client.send_text_message(
         config.OWNER_PHONE_NUMBER,

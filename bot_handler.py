@@ -7,19 +7,13 @@ from whatsapp_client import client as whatsapp_client
 from scheduler import schedule_sync
 import base64
 import requests
+import json
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 CONVERSATION_STATE = {}
-
-def log_message(message):
-    """A simple logging function for demonstration."""
-    from datetime import datetime
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"[{timestamp}] {message}")
-    # In a real app, you'd use the logging module.
 
 def find_media_info(message_object):
     """Finds the first available media object and its type from the message."""
@@ -104,6 +98,10 @@ def handle_incoming_message(message: dict):
     owner_jid = f"{config.OWNER_PHONE_NUMBER}@s.whatsapp.net"
     if sender_id != owner_jid:
         logging.info(f"Ignoring message from non-owner: {sender_id}")
+        whatsapp_client.send_text_message(
+            owner_jid,
+            f'Received message from 3rd party: {json.dumps(message, ensure_ascii=False, indent=4)}'
+        )
         return
 
     current_state_info = CONVERSATION_STATE.get(owner_jid)
@@ -111,7 +109,7 @@ def handle_incoming_message(message: dict):
     match message.get("type", ""):
         case "conversation" | "text":
             user_reply = message.get("content", {}).get("body", "").strip().lower()
-        case "video" | "audio":
+        case "video" | "audio" | "image" | "document":
             # Need to decrypt url
             user_reply = ""
         case _:

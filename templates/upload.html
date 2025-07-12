@@ -1,0 +1,32 @@
+<!-- templates/upload.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Uploader</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Upload a File</h1>
+        <p>Welcome, {{ current_user.username }}! | <a href="{{ url_for('logout') }}">Logout</a></p>
+        
+        <form id="upload-form" enctype="multipart/form-data">
+            <input type="file" id="file-input" name="file" required>
+            <button type="submit">Upload</button>
+        </form>
+        
+        <!-- Progress Bar -->
+        <div class="progress-container" id="progress-container" style="display:none;">
+            <div class="progress-bar" id="progress-bar">0%</div>
+        </div>
+
+        <!-- Status Messages -->
+        <div id="status-messages"></div>
+
+    </div>
+    
+    <script src="{{ url_for('static', filename='js/upload.js') }}"></script>
+</body>
+</html>

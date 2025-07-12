@@ -1,22 +1,162 @@
 import os
 import logging
+from logging.handlers import TimedRotatingFileHandler
 import requests
 import ngrok
-from flask import Flask, request, jsonify, send_from_directory, abort
-
-
-# Import our custom modules
+from flask import Flask, request, jsonify, send_from_directory, abort, render_template, redirect, url_for, flash
+from datetime import datetime
 import config
 from scheduler import start_scheduler
 from bot_handler import handle_incoming_message, find_media_info, handle_media_decryption
 
+from werkzeug.utils import secure_filename
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 
-# --- Basic Setup ---
-#logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Flask(__name__)
+app.config['SECRET_KEY'] = 'a-super-secret-key-that-you-should-change'
+os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
+os.makedirs(config.UPLOAD_DIR, exist_ok=True)
+os.makedirs(config.LOGS_DIR, exist_ok=True)
+
+# --- Flask requests logger ---
+request_logger = logging.getLogger('request_logger')
+request_logger.setLevel(logging.INFO)
+requests_log_handlers = TimedRotatingFileHandler(
+    os.path.join(config.LOGS_DIR, 'requests.log'),
+    when='midnight',
+    interval=1,
+    backupCount=0,
+    encoding='utf-8',
+    utc=True
+)
+requests_log_handlers.suffix = "%Y-%m-%d"
+requests_log_handlers.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+request_logger.addHandler(requests_log_handlers)
+request_logger.propagate=False  # do NOT log to console
+
+def get_client_ip():
+    if request.headers.get('X-Forwarded-For'):
+        return request.headers.get('X-Forwarded-For').split(',')[0].strip()
+    return request.remote_addr
+
+@app.before_request
+def log_incoming_request():
+    ts = datetime.utcnow().isoformat()
+    ip = get_client_ip()
+    method = request.method
+    path = request.path
+    logging.info(f"📥 Received webhook: [{ts}] {ip} {method} {path}]")
+    try:
+        if request.content_type and 'multipart/form-data' in request.content_type:
+            file_info = []
+            for f in request.files.values():
+                file_info.append({
+                    'filename': f.filename,
+                    'content_type': f.content_type,
+                    'content_length': request.content_length  # request-wide length, optional
+                })
+            request_logger.info(f"[{ts}] {ip} {method} {path} - File upload: {file_info}")
+
+        elif request.is_json:
+            data = request.get_json()
+            request_logger.info(f"[{ts}] {ip} {method} {path} - JSON body: {data}")
+        else:
+            raw_data = request.get_data(as_text=True)
+            request_logger.warning(f"[{ts}] {ip} {method} {path} - Non-JSON body: {raw_data}")
+    except Exception as e:
+        request_logger.error(f"[{ts}] {ip} {method} {path} - Error reading request: {e}")
+
+
+# --- Flask-Login Configuration ---
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login' # Redirect to 'login' view if user is not logged in
+
+# --- Dummy User Model (for demonstration) ---
+# In a real app, you would use a database (e.g., SQLAlchemy)
+class User(UserMixin):
+    def __init__(self, id, username, password):
+        self.id = id
+        self.username = username
+        self.password = password
+
+# Dummy user database
+users = {
+    '1': User(id='1', username='verified_user', password='password123')
+}
+
+@login_manager.user_loader
+def load_user(user_id):
+    return users.get(user_id)
+
+@app.route('/')
+def index():
+    if current_user.is_authenticated:
+        return f'Hello, {current_user.username}! <a href="/upload">Upload a File</a> or <a href="/logout">Logout</a>'
+    return 'Hello, Guest! <a href="/login">Login</a>'
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        # Find user
+        user_to_login = None
+        for user in users.values():
+            if user.username == username and user.password == password:
+                user_to_login = user
+                break
+        
+        if user_to_login:
+            login_user(user_to_login)
+            flash('Logged in successfully!', 'success')
+            return redirect(url_for('upload_file'))
+        else:
+            flash('Invalid username or password.', 'danger')
+            
+    return render_template('login.html')
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    flash('You have been logged out.', 'info')
+    return redirect(url_for('index'))
+
+@app.route('/upload', methods=['GET', 'POST'])
+@login_required # This decorator protects the route
+def upload_file():
+    if request.method == 'POST':
+        # Check if the post request has the file part
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file part in the request'}), 400
+        
+        file = request.files['file']
+        
+        # If the user does not select a file, the browser submits an
+        # empty file without a filename.
+        if file.filename == '':
+            return jsonify({'error': 'No selected file'}), 400
+            
+        if file:
+            # Use secure_filename to prevent directory traversal attacks
+            filename = secure_filename(file.filename)
+            save_path = os.path.join(config.UPLOAD_DIR, filename)
+            file.save(save_path)
+            
+            # Return a success response to the JavaScript
+            return jsonify({
+                'message': 'File uploaded successfully!',
+                'filename': filename
+            }), 200
+
+    # If GET request, render the upload form
+    return render_template('upload.html')
+
+
 # --- NEW: Payload Parser Function ---
 def parse_raw_message(raw_msg: dict) -> dict or None:
     """
@@ -54,6 +194,9 @@ def parse_raw_message(raw_msg: dict) -> dict or None:
     elif "videoMessage" in message_content and message_content["videoMessage"]:
         parsed_message["type"] = "video"
         parsed_message["content"]["body"] = message_content["videoMessage"]
+    elif "imageMessage" in message_content and message_content["imageMessage"]:
+        parsed_message["type"] = "image"
+        parsed_message["content"]["body"] = message_content["imageMessage"]
     elif "audioMessage" in message_content and message_content["audioMessage"]:
         parsed_message["type"] = "audio"
         parsed_message["content"]["body"] = message_content["audioMessage"]
@@ -75,7 +218,6 @@ def preprocess_incoming_message(message_content, media_result, message_id):
 
         decrypted_data = handle_media_decryption(media_info, media_type)
         logging.info(f"Successfully decrypted media. saving to file")
-        os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
         extension = media_info.get('mimetype', 'application/octet-stream').split('/')[-1]
         filename = media_info.get('fileName') or f"{message_id}.{extension}"
         output_path = os.path.join(config.DOWNLOAD_DIR, os.path.basename(filename)) # Use basename to prevent path traversal
@@ -95,15 +237,15 @@ def update_dict_path(data, path, value, sep="/"):
 
 
 # --- Webhook Handler ---
-@app.route('/', methods=['POST'])
-def webhook():
+@app.route('/wasender_webhook', methods=['POST'])
+def wasender_webhook():
     """Main webhook endpoint to receive events from WasenderAPI."""
     if not request.is_json:
         logging.warning("Received non-JSON request")
         return "Invalid request", 400
     
     payload = request.get_json()
-    logging.info(f"📥 Received webhook: {payload}")
+    #logging.info(f"📥 Received webhook: {payload}")
 
     match payload.get("event"):
         case "messages.upsert":
@@ -160,30 +302,6 @@ def webhook():
             pass
     return jsonify({"status": "ok"}), 200
 
-    if payload.get("event") == "messages.upsert":
-        data = payload.get("data", {})
-        
-        raw_messages = data.get("messages")
-        messages_to_process = []
-
-        # FIX: Handle both single object and list of objects
-        if isinstance(raw_messages, dict):
-            messages_to_process.append(raw_messages)
-        elif isinstance(raw_messages, list):
-            messages_to_process = raw_messages
-        
-        for raw_msg in messages_to_process:
-            # Use our parser to standardize the message
-            parsed_message = parse_raw_message(raw_msg)
-            
-            if parsed_message and not parsed_message.get("from_me"):
-                handle_incoming_message(parsed_message)
-    else:
-        print(payload.get('event'))
-
-    return jsonify({"status": "ok"}), 200
-
-
 @app.route('/health', methods=['GET'])
 def health_check():
     """A simple health check endpoint."""
@@ -226,19 +344,18 @@ def update_wasender_webhook(url):
     except requests.exceptions.RequestException as e:
         logging.error(f"❌ WasenderAPI webhook update failed: {e.response.status_code if e.response else 'N/A'}, {e.response.text if e.response else str(e)}")
         return False
-
+    
 # --- Main Execution Block (No changes needed here) ---
 if __name__ == "__main__":
     start_scheduler()
 
     try:
         ngrok.set_auth_token(config.NGROK_AUTHTOKEN)
-        listener = ngrok.forward("http://localhost:5000")
+        listener = ngrok.forward("http://localhost:5000", domain=config.NGROK_RESERVED_DOMAIN)
         config.PUBLIC_URL = listener.url()
         logging.info(f"🔗 ngrok tunnel is active: {config.PUBLIC_URL}")
 
-        update_wasender_webhook(config.PUBLIC_URL)
-        
+        update_wasender_webhook(f'{config.PUBLIC_URL}/wasender_webhook')
         logging.info("🚀 Starting Flask server...")
         app.run(host="0.0.0.0", port=5000)
 
