@@ -2,6 +2,7 @@ import os
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import requests
+import secrets
 import ngrok
 from flask import Flask, request, jsonify, send_from_directory, abort, render_template, redirect, url_for, flash
 from datetime import datetime
@@ -12,16 +13,37 @@ from bot_handler import handle_incoming_message, find_media_info, handle_media_d
 from werkzeug.utils import secure_filename
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 
+
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
+
+# --- App's main logger ---
+main_log_handler = TimedRotatingFileHandler(
+    os.path.join(config.LOGS_DIR, 'app.log'),
+    when='midnight',
+    interval=1,
+    backupCount=0,
+    encoding='utf-8',
+    utc=False
+)
+main_log_handler.suffix = "%Y-%m-%d"
+main_log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().addHandler(main_log_handler)          # Log to file
+logging.getLogger().addHandler(logging.StreamHandler())   # Log to console
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'a-super-secret-key-that-you-should-change'
+#logging.basicConfig(level=logging.INFO)
+logging.info("Logger initialized with daily rotation.")
+
+# --- Initialize app directories ---
 os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(config.UPLOAD_DIR, exist_ok=True)
 os.makedirs(config.LOGS_DIR, exist_ok=True)
 
-# --- Flask requests logger ---
+# --- Initialize Flask app & requests-logger ---
+
+app = Flask(__name__)
+app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(24))
 request_logger = logging.getLogger('request_logger')
 request_logger.setLevel(logging.INFO)
 requests_log_handlers = TimedRotatingFileHandler(

@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+FLASK_SECRET_KEY = os.environ.get("FLASK_SECRET_KEY")
 NGROK_AUTHTOKEN = os.environ.get("NGROK_AUTHTOKEN")
 NGROK_RESERVED_DOMAIN = os.environ.get("NGROK_RESERVED_DOMAIN")
 WASENDER_SESSION_ID = os.environ.get("WASENDER_SESSION_ID")
