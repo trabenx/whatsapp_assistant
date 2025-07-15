@@ -1,9 +1,11 @@
 import os
 import logging
+import time
 from logging.handlers import TimedRotatingFileHandler
 import requests
 import secrets
 import ngrok
+import json
 from flask import Flask, request, jsonify, send_from_directory, abort, render_template, redirect, url_for, flash
 from datetime import datetime
 import config
@@ -13,6 +15,7 @@ from bot_handler import handle_incoming_message, find_media_info, handle_media_d
 from werkzeug.utils import secure_filename
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 
+from persistent_queue_processor import PersistentQueueProcessor
 
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
@@ -39,6 +42,14 @@ logging.info("Logger initialized with daily rotation.")
 os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(config.UPLOAD_DIR, exist_ok=True)
 os.makedirs(config.LOGS_DIR, exist_ok=True)
+
+# --- Initialize persistent queue process ---
+def wasender_processing_logic(payload):
+    payload_json = json.loads(payload)
+    # simulate processing logic
+    time.sleep(2)
+    
+processor = PersistentQueueProcessor(r'dbs/wasender_queue.db', wasender_processing_logic)
 
 # --- Initialize Flask app & requests-logger ---
 
@@ -262,11 +273,17 @@ def update_dict_path(data, path, value, sep="/"):
 @app.route('/wasender_webhook', methods=['POST'])
 def wasender_webhook():
     """Main webhook endpoint to receive events from WasenderAPI."""
+
+    if not request.headers.get('X-Webhook-Signature','') == config.WASENDER_WEBHOOK_SECRET:
+        logging.warning("Request arrive with invalid/empty webhook secret")
+        return "Invalid request", 400
+
     if not request.is_json:
         logging.warning("Received non-JSON request")
         return "Invalid request", 400
     
     payload = request.get_json()
+    processor.append(json.dumps(payload))
     #logging.info(f"📥 Received webhook: {payload}")
 
     match payload.get("event"):
@@ -352,6 +369,7 @@ def update_wasender_webhook(url):
         "account_protection": False,
         "webhook_url": url,
         "webhook_enabled": True,
+        "webhook_secret": "7ab65c4d3efffh28f6ad40ee9fc87b7fa",
         "webhook_events": ["messages.upsert","message.sent","qrcode.updated","messages.update",
                         "message-receipt.update","chats.upsert","chats.delete","groups.update",
                         "contacts.upsert","session.status","messages.delete","messages.reaction",
@@ -387,3 +405,4 @@ if __name__ == "__main__":
         if config.PUBLIC_URL:
             logging.info("Shutting down ngrok tunnel.")
             ngrok.disconnect(config.PUBLIC_URL)
+        processor.stop()
