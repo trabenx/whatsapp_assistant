@@ -168,16 +168,21 @@ def logout():
     flash('You have been logged out.', 'info')
     return redirect(url_for('index'))
 
-def send_to_n8n(filepath, filename, user_id):
-    webhook_url = "http://45.79.125.152:5678/webhook/9736c686-5132-4cc9-b122-585887c29d3f"
-    with open(filepath, 'rb') as f:
-        requests.post(
-            webhook_url,
-            files={'file': (filename, f)},
-            data={
-                'user_id': user_id,
-                'filepath': filepath }
-        )
+def send_to_n8n(secured_filename, original_filename, userid, username):
+    webhook_url = "http://45.79.125.152:5678/webhook-test/9736c686-5132-4cc9-b122-585887c29d3f"
+    payload = {
+        'filename': original_filename,
+        'base_url': config.PUBLIC_URL,
+        'download_url': f'{config.PUBLIC_URL}/download/{secured_filename}',
+        'user_id': userid,
+        'user_name': username
+    }
+    try:
+        response = requests.post(webhook_url, json=payload)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        # Optional: log or handle failure
+        logging.error(f"❌ Error sending to n8n: {e.response.status_code if e.response else 'N/A'}, {e.response.text if e.response else str(e)}")
 
 @app.route('/upload', methods=['GET', 'POST'])
 @login_required # This decorator protects the route
@@ -196,16 +201,16 @@ def upload_file():
             
         if file:
             # Use secure_filename to prevent directory traversal attacks
-            filename = secure_filename(file.filename)
-            save_path = os.path.join(config.UPLOAD_DIR, filename)
+            secured_filename = secure_filename(file.filename)
+            save_path = os.path.join(config.DOWNLOAD_DIR, secured_filename)
             file.save(save_path)
             
-            Thread(target=send_to_n8n, args=(save_path, filename, current_user.id)).start()
+            Thread(target=send_to_n8n, args=(secured_filename, file.filename, current_user.id, current_user.username)).start()
 
             # Return a success response to the JavaScript
             return jsonify({
                 'message': 'File uploaded successfully!',
-                'filename': filename
+                'filename': secured_filename
             }), 200
 
     # If GET request, render the upload form
