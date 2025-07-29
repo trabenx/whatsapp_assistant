@@ -8,6 +8,7 @@ import ngrok
 import json
 from flask import Flask, request, jsonify, send_from_directory, abort, render_template, redirect, url_for, flash
 from datetime import datetime
+from threading import Thread
 import config
 from scheduler import start_scheduler
 from bot_handler import handle_incoming_message, find_media_info, handle_media_decryption
@@ -167,6 +168,17 @@ def logout():
     flash('You have been logged out.', 'info')
     return redirect(url_for('index'))
 
+def send_to_n8n(filepath, filename, user_id):
+    webhook_url = "http://45.79.125.152:5678/webhook/9736c686-5132-4cc9-b122-585887c29d3f"
+    with open(filepath, 'rb') as f:
+        requests.post(
+            webhook_url,
+            files={'file': (filename, f)},
+            data={
+                'user_id': user_id,
+                'filepath': filepath }
+        )
+
 @app.route('/upload', methods=['GET', 'POST'])
 @login_required # This decorator protects the route
 def upload_file():
@@ -188,6 +200,8 @@ def upload_file():
             save_path = os.path.join(config.UPLOAD_DIR, filename)
             file.save(save_path)
             
+            Thread(target=send_to_n8n, args=(save_path, filename, current_user.id)).start()
+
             # Return a success response to the JavaScript
             return jsonify({
                 'message': 'File uploaded successfully!',
