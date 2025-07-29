@@ -35,8 +35,8 @@ logging.getLogger().setLevel(logging.INFO)
 logging.getLogger().addHandler(main_log_handler)          # Log to file
 logging.getLogger().addHandler(logging.StreamHandler())   # Log to console
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-#logging.basicConfig(level=logging.INFO)
 logging.info("Logger initialized with daily rotation.")
+logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
 # --- Initialize app directories ---
 os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
@@ -44,12 +44,15 @@ os.makedirs(config.UPLOAD_DIR, exist_ok=True)
 os.makedirs(config.LOGS_DIR, exist_ok=True)
 
 # --- Initialize persistent queue process ---
+from whatsapp.wasenderapi_whatsapp_provider import WASenderApiWhatsAppProvider
+wa_provider = WASenderApiWhatsAppProvider()
+
 def wasender_processing_logic(payload):
     payload_json = json.loads(payload)
     # simulate processing logic
     time.sleep(2)
     
-processor = PersistentQueueProcessor(r'dbs/wasender_queue.db', wasender_processing_logic)
+processor = PersistentQueueProcessor(r'dbs/wasender_queue.db', wa_provider.webhook_handler)
 
 # --- Initialize Flask app & requests-logger ---
 
@@ -102,6 +105,11 @@ def log_incoming_request():
     except Exception as e:
         request_logger.error(f"[{ts}] {ip} {method} {path} - Error reading request: {e}")
 
+@app.errorhandler(Exception)
+def handle_global_exception(e):
+    """Global handler for unhandled exceptions."""
+    logging.error(f"Unhandled Exception: {e}", exc_info=True)
+    return jsonify(status='error', message='An internal server error occurred.'), 500
 
 # --- Flask-Login Configuration ---
 login_manager = LoginManager()
@@ -190,85 +198,6 @@ def upload_file():
     return render_template('upload.html')
 
 
-# --- NEW: Payload Parser Function ---
-def parse_raw_message(raw_msg: dict) -> dict or None:
-    """
-    Parses the raw message object from the WasenderAPI webhook
-    and transforms it into a standardized format for our bot.
-    """
-    if not isinstance(raw_msg, dict):
-        return None
-
-    key = raw_msg.get("key", {})
-    message_content = raw_msg.get("message", {})
-    
-    if not key or not message_content:
-        return None
-
-    # This is our new, clean, and standardized message format
-    parsed_message = {
-        "id": key.get("id"),
-        "from": key.get("remoteJid"),
-        "from_me": key.get("fromMe", False),
-        "type": None,
-        "content": {}
-    }
-
-    # Determine message type and content
-    if "conversation" in message_content and message_content["conversation"]:
-        parsed_message["type"] = "text"
-        parsed_message["content"]["body"] = message_content["conversation"]
-    # Add other types as you discover their payload structure
-    # For example, for an image:
-    # elif "imageMessage" in message_content:
-    #     parsed_message["type"] = "image"
-    #     parsed_message["content"]["url"] = message_content["imageMessage"].get("url")
-    #     parsed_message["content"]["caption"] = message_content["imageMessage"].get("caption")
-    elif "videoMessage" in message_content and message_content["videoMessage"]:
-        parsed_message["type"] = "video"
-        parsed_message["content"]["body"] = message_content["videoMessage"]
-    elif "imageMessage" in message_content and message_content["imageMessage"]:
-        parsed_message["type"] = "image"
-        parsed_message["content"]["body"] = message_content["imageMessage"]
-    elif "audioMessage" in message_content and message_content["audioMessage"]:
-        parsed_message["type"] = "audio"
-        parsed_message["content"]["body"] = message_content["audioMessage"]
-    else:
-        # Unsupported message type for now
-        return None
-
-    return parsed_message
-
-def preprocess_incoming_message(message_content, media_result, message_id):
-    updates_dict = {}
-    if message_content:
-        logging.info(f"Text: {message_content}")
-        # TODO: Save text message to your database here.
-        
-    if media_result:
-        media_info, media_type = media_result
-        logging.info(f"Media found. Type: {media_type}. Attempting to decrypt...")
-
-        decrypted_data = handle_media_decryption(media_info, media_type)
-        logging.info(f"Successfully decrypted media. saving to file")
-        extension = media_info.get('mimetype', 'application/octet-stream').split('/')[-1]
-        filename = media_info.get('fileName') or f"{message_id}.{extension}"
-        output_path = os.path.join(config.DOWNLOAD_DIR, os.path.basename(filename)) # Use basename to prevent path traversal
-        with open(output_path, 'wb') as f:
-            f.write(decrypted_data)
-        logging.info(f"Decrypted file saved to {output_path}")
-        logging.info(f"Decrypted file available via {config.PUBLIC_URL}/download/{filename}")
-        updates_dict[f"data/messages/message/{media_type}Message/url"] = f'{config.PUBLIC_URL}/download/{filename}'
-    return updates_dict
-
-def update_dict_path(data, path, value, sep="/"):
-    keys = path.split(sep)
-    d = data
-    for key in keys[:-1]:
-        d = d.setdefault(key, {})  # Create nested dicts if not present
-    d[keys[-1]] = value
-
-
 # --- Webhook Handler ---
 @app.route('/wasender_webhook', methods=['POST'])
 def wasender_webhook():
@@ -282,63 +211,9 @@ def wasender_webhook():
         logging.warning("Received non-JSON request")
         return "Invalid request", 400
     
-    payload = request.get_json()
-    processor.append(json.dumps(payload))
-    #logging.info(f"📥 Received webhook: {payload}")
+    payload = request.get_data()
+    processor.append(payload)
 
-    match payload.get("event"):
-        case "messages.upsert":
-            message_data = payload.get('data', {}).get('messages', [{}])
-
-            # Filter non messages (e.g., user deleted messages):
-            if not message_data:
-                logging.warning('Webhook received but no message data found.')
-                return jsonify({"status": "skipped, no messages found"}), 200
-
-            key = message_data.get('key', {})
-            message_id = key.get('id', 'unknown_id')
-            remote_jid = key.get('remoteJid')
-            if not remote_jid:
-                logging.warning('Ignoring message with no remoteJid.')
-                return jsonify({"status": "Ignoring message with no remoteJid"}), 200
-            
-            from_me = key.get('fromMe', False)
-            push_name = message_data.get('pushName', 'Unknown') if not from_me else 'Me'
-            phone_number = remote_jid.split('@')[0]
-            
-            message = message_data.get('message', {})
-            message_content = message.get('conversation') or (message.get('extendedTextMessage') or {}).get('text')
-            media_result = find_media_info(message)
-            
-            if not message_content and not media_result:
-                logging.warning(f"Ignoring event with no content (ID: {message_id})")
-                return jsonify({"status": f"Ignoring event with no content (ID: {message_id})"}), 200
-            
-            logging.info(f"Pre-processing message from {push_name} ({phone_number}). ID: {message_id}")
-            updates_dict = preprocess_incoming_message(message_content, media_result, message_id)
-            for path,value in updates_dict.items():
-                update_dict_path(payload, path, value)
-            logging.info("Finished pre-processing message")
-
-            data = payload.get("data", {})
-        
-            raw_messages = data.get("messages")
-            messages_to_process = []
-
-            # FIX: Handle both single object and list of objects
-            if isinstance(raw_messages, dict):
-                messages_to_process.append(raw_messages)
-            elif isinstance(raw_messages, list):
-                messages_to_process = raw_messages
-            
-            for raw_msg in messages_to_process:
-                # Use our parser to standardize the message
-                parsed_message = parse_raw_message(raw_msg)
-                
-                if parsed_message and not parsed_message.get("from_me"):
-                    handle_incoming_message(parsed_message)
-        case _:
-            pass
     return jsonify({"status": "ok"}), 200
 
 @app.route('/health', methods=['GET'])
@@ -369,7 +244,6 @@ def update_wasender_webhook(url):
         "account_protection": False,
         "webhook_url": url,
         "webhook_enabled": True,
-        "webhook_secret": "7ab65c4d3efffh28f6ad40ee9fc87b7fa",
         "webhook_events": ["messages.upsert","message.sent","qrcode.updated","messages.update",
                         "message-receipt.update","chats.upsert","chats.delete","groups.update",
                         "contacts.upsert","session.status","messages.delete","messages.reaction",

@@ -3,6 +3,7 @@ import threading
 import json
 import time
 import os
+import logging
 from datetime import datetime, timedelta
 from typing import Callable, Dict
 
@@ -35,7 +36,7 @@ class PersistentQueueProcessor:
         self.conn.execute('''
             CREATE TABLE IF NOT EXISTS queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                payload TEXT NOT NULL,
+                payload BLOB  NOT NULL,
                 status TEXT NOT NULL CHECK(status IN ('queued', 'processing', 'processed', 'failed')),
                 retries INTEGER DEFAULT 0,
                 processed_at DATETIME
@@ -76,16 +77,14 @@ class PersistentQueueProcessor:
                             "UPDATE queue SET status = 'processing' WHERE id = ?",
                             (item_id,)
                         )
-                    self.process_callback(payload)
-
-                    self._archive_processed(payload)
-
+                    process_result = self.process_callback(payload)
+                    self._archive_processed(payload, process_result[0], process_result[1])
                     # Remove from main queue
                     with self.conn:
                         self.conn.execute("DELETE FROM queue WHERE id = ?", (item_id,))
 
                 except Exception as e:
-                    print(f"[ERROR] Failed to process id={item_id}: {e}")
+                    logging.error(f"[ERROR] Failed to process id={item_id}: {e}", exc_info=True)
                     retries += 1
 
                     if retries < 3:
@@ -96,23 +95,34 @@ class PersistentQueueProcessor:
                             )
                     else:
                         try:
-                            # Try to parse the string as JSON
-                            payload_json = json.loads(payload)
+                            # First, try to decode from byte array to string:
+                            payload_str = payload.decode('utf-8')
+                            try:
+                                # Check if valid json:
+                                payload_json = json.loads(payload_str)
 
-                            # If successful, format and save as .json
+                                # If successful, format and save as .json
+                                filename = os.path.join(
+                                    self.failed_dir,
+                                    f"{datetime.utcnow().isoformat(timespec='seconds').replace(':','-')}_failed_id_{item_id}.json"
+                                )
+                                with open(filename, 'w') as f:
+                                    json.dump(payload_json, f, indent=2)
+                            except json.JSONDecodeError:
+                                # If it's not valid JSON, save as plain .txt                          
+                                filename = os.path.join(
+                                    self.failed_dir,
+                                    f"{datetime.utcnow().isoformat(timespec='seconds').replace(':', '-')}_failed_id_{item_id}.txt"
+                                )
+                                with open(filename, 'w', encoding='utf-8') as f:
+                                    f.write(payload_str)
+                        except UnicodeDecodeError as e:
+                            # If it's not valid string, save as binary file .bin
                             filename = os.path.join(
                                 self.failed_dir,
-                                f"{datetime.utcnow().isoformat(timespec='seconds').replace(':','-')}_failed_id_{item_id}.json"
+                                f"{datetime.utcnow().isoformat(timespec='seconds').replace(':', '-')}_failed_id_{item_id}.bin"
                             )
-                            with open(filename, 'w') as f:
-                                json.dump(json.loads(payload_json), f, indent=2)
-                        except json.JSONDecodeError:
-                            # If it's not valid JSON, save as plain .txt                          
-                            filename = os.path.join(
-                                self.failed_dir,
-                                f"{datetime.utcnow().isoformat(timespec='seconds').replace(':', '-')}_failed_id_{item_id}.txt"
-                            )
-                            with open(filename, 'w', encoding='utf-8') as f:
+                            with open(filename, 'wb') as f:
                                 f.write(payload)
                         with self.conn:
                             self.conn.execute("DELETE FROM queue WHERE id = ?", (item_id,))
@@ -132,25 +142,24 @@ class PersistentQueueProcessor:
                 print(f"[ERROR] During cleanup: {e}")
             time.sleep(self.cleanup_interval)
 
-    def _archive_processed(self, payload: str):
+    def _archive_processed(self, payload, table_prefix, extra_data):
         date_str = datetime.utcnow().date().isoformat()
         db_filename = os.path.join(self.archive_dir, f"processed_{date_str}.db")
         conn = sqlite3.connect(db_filename)
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS processed_items (
+        conn.execute(f'''
+            CREATE TABLE IF NOT EXISTS {table_prefix}_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 processed_at DATETIME NOT NULL,
-                payload TEXT NOT NULL
+                payload BLOB NOT NULL,
+                extra_data TEXT
             )
         ''')
         conn.execute(
-            'INSERT INTO processed_items (processed_at, payload) VALUES (?, ?)',
-            (datetime.utcnow().isoformat(), payload)
+            f'INSERT INTO {table_prefix}_items (processed_at, payload, extra_data) VALUES (?, ?, ?)',
+            (datetime.utcnow().isoformat(), payload, extra_data)
         )
         conn.commit()
-        conn.close()
-
-        
+        conn.close()        
 
     def stop(self):
         self.stop_event.set()

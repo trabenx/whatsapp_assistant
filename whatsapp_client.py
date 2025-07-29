@@ -18,6 +18,8 @@ class WhatsAppClient:
     def send_text_message(self, to, message):
         """Sends a simple text message."""
         logging.info(f"-> Sending text to {to}: {message[:50]}...")
+        # TODO: re-enable
+        return None
         try:
             response = self.client.send_text(to, message)
             logging.info(f"-> Text message sent, response: {response}")
